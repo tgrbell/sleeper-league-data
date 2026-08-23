@@ -122,5 +122,6 @@ if league_id_input:
                     st.write("**Lowest 5 Single Gameweek Scores**")
                     st.table(lowest_scores[["Season", "Gameweek", "Manager", "Points"]])
 
-        with tab_raw := tab_h2h:
-            st.dataframe(df_matchups, use_container_width=True)
+with tab_h2h:
+    st.subheader("Raw Matchup History")
+    st.dataframe(df_matchups, use_container_width=True)
