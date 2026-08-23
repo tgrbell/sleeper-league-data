@@ -130,8 +130,9 @@ if league_input:
             all_totals.extend(s["roster_totals"])
             all_matchups.extend(s["matchups"])
             
-        df_totals = pd.DataFrame(all_totals)
-        df_matchups = pd.DataFrame(all_matchups)
+        # Initialize DataFrames with guaranteed schema
+        df_totals = pd.DataFrame(all_totals, columns=["Season", "League_ID", "Manager", "Wins", "Draws", "Losses", "Total_Matches", "Points_For", "Points_Against"]) if all_totals else pd.DataFrame(columns=["Season", "League_ID", "Manager", "Wins", "Draws", "Losses", "Total_Matches", "Points_For", "Points_Against"])
+        df_matchups = pd.DataFrame(all_matchups, columns=["Season", "Gameweek", "Matchup_ID", "Roster_ID", "Manager", "Points"]) if all_matchups else pd.DataFrame(columns=["Season", "Gameweek", "Matchup_ID", "Roster_ID", "Manager", "Points"])
         
         # Sidebar
         st.sidebar.title("Archives Found")
@@ -144,13 +145,11 @@ if league_input:
             "⚔️ Matchup Records"
         ])
         
-        # --- TAB 1: ALL-TIME STANDINGS (PULLS FROM HISTORICAL ROSTER TOTALS) ---
+        # --- TAB 1: ALL-TIME STANDINGS ---
         with tab_standings:
             st.subheader("All-Time Career Standings")
-            # Only include seasons where games were played
-            played_totals = df_totals[df_totals["Total_Matches"] > 0]
-            
-            if not played_totals.empty:
+            if not df_totals.empty and (df_totals["Total_Matches"] > 0).any():
+                played_totals = df_totals[df_totals["Total_Matches"] > 0]
                 career = played_totals.groupby("Manager").agg(
                     Seasons=("Season", "nunique"),
                     Matches=("Total_Matches", "sum"),
@@ -199,8 +198,8 @@ if league_input:
         # --- TAB 3: MATCHUP RECORDS ---
         with tab_matchups:
             st.subheader("Weekly High Scores & Margins")
-            active_m = df_matchups[df_matchups["Points"] > 0]
-            if not active_m.empty:
+            if not df_matchups.empty and "Points" in df_matchups.columns and (df_matchups["Points"] > 0).any():
+                active_m = df_matchups[df_matchups["Points"] > 0]
                 c1, c2 = st.columns(2)
                 with c1:
                     st.write("**Top Gameweek Scores**")
@@ -209,4 +208,4 @@ if league_input:
                     st.write("**Lowest Active Gameweek Scores**")
                     st.dataframe(active_m.sort_values(by="Points", ascending=True).head(10)[["Season", "Gameweek", "Manager", "Points"]].style.format({"Points": "{:.1f}"}), use_container_width=True)
             else:
-                st.info("Individual weekly fixture histories will unlock on Tuesday once Gameweek 1 scores are locked.")
+                st.info("Individual weekly fixture histories will unlock once Gameweek 1 scores are officially locked.")
