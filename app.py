@@ -10,6 +10,7 @@ def fetch_full_league_data(league_ids_input: str):
     raw_ids = [x.strip() for x in league_ids_input.split(",") if x.strip()]
     visited_ids = set()
     seasons = []
+    global_user_map = {} # Maps user_id -> latest seen display name
     
     for initial_id in raw_ids:
         curr_id = initial_id
@@ -25,24 +26,29 @@ def fetch_full_league_data(league_ids_input: str):
             users = requests.get(f"{BASE_URL}/league/{curr_id}/users").json() or []
             rosters = requests.get(f"{BASE_URL}/league/{curr_id}/rosters").json() or []
             
-            # Map user names
-            user_map = {}
+            # Map users in this specific season
             for u in users:
+                uid = u.get("user_id")
                 display = u.get("metadata", {}).get("team_name") or u.get("display_name") or u.get("username")
-                user_map[u["user_id"]] = display
+                # Keep latest display name encountered
+                if uid and uid not in global_user_map:
+                    global_user_map[uid] = display
                 
             roster_totals = []
-            roster_map = {}
+            roster_to_uid = {}
             for r in rosters:
                 rid = r.get("roster_id")
                 oid = r.get("owner_id")
                 if not oid and r.get("co_owners"):
                     oid = r["co_owners"][0]
-                m_name = user_map.get(oid, f"Team {rid}")
-                roster_map[rid] = m_name
+                
+                # Fallback if unassigned
+                uid = oid if oid else f"unassigned_{rid}"
+                roster_to_uid[rid] = uid
+                if uid not in global_user_map:
+                    global_user_map[uid] = f"Team {rid}"
                 
                 settings = r.get("settings", {})
-                # Fetch lifetime season totals directly from roster
                 fpts = settings.get("fpts", 0)
                 fpts_dec = settings.get("fpts_decimal", 0)
                 pf = float(f"{fpts}.{fpts_dec}") if fpts_dec else float(fpts)
@@ -58,7 +64,7 @@ def fetch_full_league_data(league_ids_input: str):
                 roster_totals.append({
                     "Season": str(l_info.get("season", "Unknown")),
                     "League_ID": curr_id,
-                    "Manager": m_name,
+                    "User_ID": uid,
                     "Wins": wins,
                     "Draws": ties,
                     "Losses": losses,
@@ -67,7 +73,7 @@ def fetch_full_league_data(league_ids_input: str):
                     "Points_Against": pa
                 })
             
-            # Weekly Matchups (for detailed records)
+            # Matchups
             matchup_rows = []
             for gw in range(1, 39):
                 m_res = requests.get(f"{BASE_URL}/league/{curr_id}/matchups/{gw}")
@@ -91,7 +97,7 @@ def fetch_full_league_data(league_ids_input: str):
                             "Gameweek": gw,
                             "Matchup_ID": m_id,
                             "Roster_ID": t.get("roster_id"),
-                            "Manager": roster_map.get(t.get("roster_id"), f"Team {t.get('roster_id')}"),
+                            "User_ID": roster_to_uid.get(t.get("roster_id")),
                             "Points": pts
                         })
             
@@ -107,7 +113,7 @@ def fetch_full_league_data(league_ids_input: str):
             
             curr_id = l_info.get("previous_league_id")
             
-    return seasons
+    return seasons, global_user_map
 
 st.title("⚽ EPL Sleeper League History & All-Time Table")
 
@@ -118,22 +124,26 @@ league_input = st.text_input(
 
 if league_input:
     with st.spinner("Fetching full league archives..."):
-        seasons = fetch_full_league_data(league_input)
+        seasons, user_map = fetch_full_league_data(league_input)
         
     if not seasons:
         st.error("No league found with that ID.")
     else:
-        # Collect data
         all_totals = []
         all_matchups = []
         for s in seasons:
             all_totals.extend(s["roster_totals"])
             all_matchups.extend(s["matchups"])
             
-        # Initialize DataFrames with guaranteed schema
-        df_totals = pd.DataFrame(all_totals, columns=["Season", "League_ID", "Manager", "Wins", "Draws", "Losses", "Total_Matches", "Points_For", "Points_Against"]) if all_totals else pd.DataFrame(columns=["Season", "League_ID", "Manager", "Wins", "Draws", "Losses", "Total_Matches", "Points_For", "Points_Against"])
-        df_matchups = pd.DataFrame(all_matchups, columns=["Season", "Gameweek", "Matchup_ID", "Roster_ID", "Manager", "Points"]) if all_matchups else pd.DataFrame(columns=["Season", "Gameweek", "Matchup_ID", "Roster_ID", "Manager", "Points"])
+        df_totals = pd.DataFrame(all_totals) if all_totals else pd.DataFrame(columns=["Season", "League_ID", "User_ID", "Wins", "Draws", "Losses", "Total_Matches", "Points_For", "Points_Against"])
+        df_matchups = pd.DataFrame(all_matchups) if all_matchups else pd.DataFrame(columns=["Season", "Gameweek", "Matchup_ID", "Roster_ID", "User_ID", "Points"])
         
+        # Attach current display names based on User_ID
+        if not df_totals.empty:
+            df_totals["Manager"] = df_totals["User_ID"].map(user_map).fillna("Unknown")
+        if not df_matchups.empty:
+            df_matchups["Manager"] = df_matchups["User_ID"].map(user_map).fillna("Unknown")
+
         # Sidebar
         st.sidebar.title("Archives Found")
         for s in seasons:
@@ -145,12 +155,15 @@ if league_input:
             "⚔️ Matchup Records"
         ])
         
-        # --- TAB 1: ALL-TIME STANDINGS ---
+        # --- TAB 1: ALL-TIME STANDINGS (GROUPED BY USER_ID) ---
         with tab_standings:
             st.subheader("All-Time Career Standings")
             if not df_totals.empty and (df_totals["Total_Matches"] > 0).any():
                 played_totals = df_totals[df_totals["Total_Matches"] > 0]
-                career = played_totals.groupby("Manager").agg(
+                
+                # Group strictly by User_ID to unify renamed managers
+                career = played_totals.groupby("User_ID").agg(
+                    Manager=("Manager", "first"),
                     Seasons=("Season", "nunique"),
                     Matches=("Total_Matches", "sum"),
                     Wins=("Wins", "sum"),
@@ -165,7 +178,8 @@ if league_input:
                 career["Diff"] = career["Points_For"] - career["Points_Against"]
                 career = career.sort_values(by=["Wins", "Points_For"], ascending=[False, False])
                 
-                st.dataframe(career.style.format({
+                cols_display = ["Manager", "Seasons", "Matches", "Wins", "Draws", "Losses", "Points_For", "Points_Against", "Diff", "Win_%", "PPG"]
+                st.dataframe(career[cols_display].style.format({
                     "Win_%": "{:.1f}%",
                     "Points_For": "{:.1f}",
                     "Points_Against": "{:.1f}",
@@ -186,7 +200,8 @@ if league_input:
                 s_df["Win_%"] = (s_df["Wins"] / s_df["Total_Matches"].replace(0, 1)) * 100
                 s_df["Diff"] = s_df["Points_For"] - s_df["Points_Against"]
                 
-                st.dataframe(s_df[["Manager", "Total_Matches", "Wins", "Draws", "Losses", "Points_For", "Points_Against", "Diff", "Win_%"]].sort_values(
+                cols_season = ["Manager", "Total_Matches", "Wins", "Draws", "Losses", "Points_For", "Points_Against", "Diff", "Win_%"]
+                st.dataframe(s_df[cols_season].sort_values(
                     by=["Wins", "Points_For"], ascending=[False, False]
                 ).style.format({
                     "Win_%": "{:.1f}%",
